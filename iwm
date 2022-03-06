@@ -1,0 +1,454 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# File name: iwm
+# Description: Irreqs Window Manager - A Simple Tiling WM With a Column Layout
+# Author: irreq (irreq@protonmail.com)
+# Date: 03/03/2022
+
+"""Documentation:
+--------------------------------------------------------------------------------
+TODO:
+    * Fix grow functions for windows
+
+
+--------------------------------------------------------------------------------
+Known Bugs:
+0 - `VIRTUAL_SCREENS` must be more than one letter or switching is impossible.
+1 - Method `move_to_screen` has a very strange behaviour.
+
+
+"""
+
+from Xlib import X, display, XK
+
+import subprocess
+import os
+import sys
+import signal
+import datetime, traceback  # Debugging
+
+# ----------- Config
+VIRTUAL_SCREENS = "asdfgzxcv"
+
+# Keys
+Mod = (1<<6)  # Super (mod4), aka "Windows" key
+Control = (1<<2)
+Shift = (1<<0)
+
+keybinds = {  # (`Modifier` and `Key`) -> operation and/or arguments
+    (Mod, "h"): ["warp", "left"],
+    (Mod, "j"): ["warp", "down"],
+    (Mod, "k"): ["warp", "up"],
+    (Mod, "l"): ["warp", "right"],
+    (Mod | Control, "h"): ["grow", "left"],
+    (Mod | Control, "j"): ["grow", "down"],
+    (Mod | Control, "k"): ["grow", "up"],
+    (Mod | Control, "l"): ["grow", "right"],
+    (Mod | Shift, "h"): ["shuffle", "left"],
+    (Mod | Shift, "j"): ["shuffle", "down"],
+    (Mod | Shift, "k"): ["shuffle", "up"],
+    (Mod | Shift, "l"): ["shuffle", "right"],
+
+    (Mod | Shift, "q"): "destroy_window",
+    (Mod | Shift, "e"): "exit",
+    (Mod | Shift, "r"): "restart",
+
+    (Mod, "Return"): ["cmd", "/usr/bin/alacritty"],
+    (Mod, "o"): ["cmd", "/usr/bin/dmenu_run"],
+
+    (Mod, "comma"): ["cmd", "amixer -q sset Master 10%-"],
+    (Mod, "period"): ["cmd", "amixer -q sset Master 10%+"],
+    (Mod, "minus"): ["cmd", "/usr/bin/audio.py toggle"],
+}
+
+# Assign keybind to virtual screen.
+for key in VIRTUAL_SCREENS:
+    keybinds[(Mod, key)] = ["select_screen", key]
+    keybinds[(Mod | Shift, key)] = ["move_to_screen", key]
+
+# ----------- Functions
+def debug(data, severity):
+    """Debug system.
+
+    severity chart:
+
+    0 -> Success
+    1 -> Notice
+    2 -> Warning
+    3 -> Error
+    """
+
+    caller = sys._getframe().f_back.f_code.co_name
+    severity_table = {0: "\x1b[32m[SUCCESS]\x1b[0m",  # Green
+                      1: "\x1b[34m[NOTICE]\x1b[0m",  # Blue
+                      2: "\x1b[33m[WARNING]\x1b[0m",  # Yellow
+                      3: "\x1b[31m[ERROR]\x1b[0m"}  # Red
+
+    msg = (severity_table[severity], str(datetime.datetime.now()), data, caller)
+    print('\n%s %s -> "%s" @ %s' % msg)
+    return None
+
+def closest(lst, n):
+    """Return 0 if list is empty"""
+    aux = []
+    lst.append(0)
+    for valor in lst:
+        aux.append(abs(n-valor))
+    return lst[aux.index(min(aux))]
+
+
+# ----------- Classes
+class Screen:
+    """
+    `self.layout` -> list(
+        [[(<win1>, {...}), (<win2>, {...})], `width`],  # First Column
+        [[(<win3>, {...}), (<win4>, {...})], `width`])  # Second Column
+    """
+
+    layout = []
+    column = 0
+    row = 0
+
+    def __init__(self):
+        pass
+
+    def get_closest_position(self, col, row):
+        """Return closest possible position to `col` and `row`"""
+        col = closest(list(range(len(self.layout))), col)
+        try:
+            row = closest(list(range(len(self.layout[col][0]))), row)
+        except:  # No more rows are present
+            row = 0
+
+        return [col, row]
+
+    def get_window_from_position(self, col, row):
+        """Return a window from a position"""
+        if not self.get_windows():
+            return debug("No windows present", 2)
+
+        col, row = self.get_closest_position(col, row)
+
+        window, height = self.layout[col][0][row]
+        return window
+
+    def get_position_from_window(self, window):
+        """Return position for window on screen."""
+        if window not in self.get_windows():
+            return debug("Window: %s is not here." % (str(window)))
+
+        for column, (col, width) in enumerate(self.layout):
+            for row, (win, height) in enumerate(col):
+                if win == window:
+                    return column, row
+
+    def get_windows(self):
+        """Return a list of windows on screen"""
+        return [win for (col, width) in self.layout for (win, height) in col]
+
+    def hide(self):
+        for win in self.get_windows():
+            win.unmap()
+
+    def show(self):
+        for win in self.get_windows():
+            win.map()
+
+
+class WM:
+    """Main Window Manager Class"""
+    EVENT_HANDLER =  {
+        X.KeyPress: '_handle_keypress',
+        X.MapRequest: '_handle_map_request',
+        X.ConfigureRequest: '_handle_configure_request',
+        X.MapNotify: '_handle_map_notify',
+        X.UnmapNotify: '_handle_unmap_notify',
+        X.EnterNotify: '_handle_enter_notify',
+        X.DestroyNotify: '_handle_destroy_notify',
+    }
+
+    key_handlers = {}
+    running = True
+    update = False
+
+    # ----------- Initiation
+    def __init__(self):
+        signal.signal(signal.SIGINT, self.exit)  # Exit gracefully
+        signal.signal(signal.SIGTERM, self.exit)
+
+        self.display = display.Display()
+        self.screen = self.display.screen()
+
+        # Configure the root window to receive all events.
+        mask = (X.SubstructureRedirectMask | X.SubstructureNotifyMask
+                | X.EnterWindowMask | X.LeaveWindowMask | X.FocusChangeMask)
+
+        self.screen.root.change_attributes(event_mask=mask)
+
+        self._grab_keys()
+
+        # Initiate virtual screens
+        self.layout = {key:Screen() for key in VIRTUAL_SCREENS}
+
+        self.current_screen = self.layout[VIRTUAL_SCREENS[0]].id  # First screen
+        # Prohibits switch loop
+        self.previous_screen = VIRTUAL_SCREENS[-1]  # Requires more than one virtual screen
+
+    def _grab_keys(self):
+        """Configure the root window to receive key inputs defined in `keybinds`."""
+        for modifier, key in keybinds:
+            code = self.display.keysym_to_keycode(XK.string_to_keysym(key))
+            self.screen.root.grab_key(code, modifier, 1, X.GrabModeAsync,
+                                      X.GrabModeAsync)
+            self.key_handlers[(modifier, code)] = (key, keybinds[(modifier, key)])
+
+    # ----------- Event handlers
+    def _handle_keypress(self, event):
+        """Event handler for KeyPress events."""
+        key, entry = self.key_handlers.get((event.state, event.detail),(None, None))
+        if entry:
+            if type(entry) != str:
+                f, args = entry[0], entry[1:]
+            else:
+                f, args = entry, None
+            method = getattr(self, f, None)
+            if method:
+                if args is not None:
+                    method(event, *args)
+                else:
+                    method(event)
+
+    def _handle_map_request(self, event):
+        """Event handler for MapRequest events."""
+        window = event.window
+        self.manage_window(window)
+
+    def _handle_configure_request(self, event):
+        """Event handler for ConfigureRequest events."""
+        window = event.window
+        x, y = event.x, event.y
+        width, height = event.width, event.height
+        mask = event.value_mask
+        if mask == 0b1111:
+            window.configure(x=x, y=y, width=width, height=height)
+        elif mask == 0b1100:
+            window.configure(width=width, height=height)
+        elif mask == 0b0011:
+            window.configure(x=x, y=y)
+        elif mask == 0b01000000:
+            window.configure(event.stack_mode)
+
+        self.update = True
+
+    def _handle_map_notify(self, event):
+        """Event handler for MapNotify events."""
+        self.manage_window(event.window)
+
+    def _handle_unmap_notify(self, event):
+        """Event handler for UnmapNotify events."""
+        self.get_screen().remove(event.window)
+        self.update = True
+
+    def _handle_enter_notify(self, event):
+        """Event handler for EnterNotify events."""
+        window = event.window
+        if window in self.get_screen().get_windows():
+            window.set_input_focus(X.RevertToParent, 0)
+
+    def _handle_destroy_notify(self, event):
+        """Event handler for DestroyNotify events."""
+        window = event.window
+        self.unmanage_window(window)
+
+    # ----------- X wrapper functions
+    def is_alive_window(self, window):
+        """Check if the window WINDOW do exist."""
+        windows = self.screen.root.query_tree().children
+        return window in windows
+
+    def get_screen_size(self):
+        """Retrieve the dimensions of the screen"""
+        width, height = self.screen.width_in_pixels, self.screen.height_in_pixels
+        return width, height
+
+    def unit_to_pixel(self, x, y, width, height):
+        """Convert screen units to pixels"""
+        screen_width, screen_height = self.get_screen_size()
+
+        px = int(screen_width * x)
+        py = int(screen_height * y)
+
+        pwidth = int(screen_width * width)
+        pheight = int(screen_height * height)
+
+        return {'x': px, 'y': py, 'width': pwidth, 'height': pheight}
+
+    # ----------- Backend
+    def get_screen(self):
+        """Retrieve current screen object"""
+        return self.layout[self.current_screen]
+
+    def manage_window(self, window):
+
+        screen = self.get_screen()
+
+        if window in screen.get_windows(): # Skip if the window is mapped
+            debug("window is already mapped", 1)
+            return
+
+        try:
+            attributes = window.get_attributes()
+            if attributes.override_redirect:
+                return
+        except:
+            debug("Could not get attributes, do not know severity.", 1)
+            return
+
+        window.map()
+        mask = X.EnterWindowMask | X.LeaveWindowMask
+        window.change_attributes(event_mask=mask)
+        screen.add(window)
+        self.update = True
+        if self.get_screen().id == screen.id:
+            self.layout[self.current_screen] = screen
+
+    def unmanage_window(self, window):
+        if window in self.get_screen().get_windows():
+            self.get_screen().remove(window)
+            window.unmap()
+            self.update = True
+
+    def tile(self):
+        """Fix dynamic tiling"""
+
+        screen = self.get_screen()
+
+        n = len(screen.layout)
+
+        if not n > 0:
+            return
+
+        width_diff = 1 / n
+
+        for i in range(n):
+            row, width = screen.layout[i]
+
+            row_n = len(row)
+            row_diff = 1 / row_n  # This require row to be filled or handled by remove
+
+            for r in range(row_n):
+                win, data = row[r]
+                win.configure(**self.unit_to_pixel(i*width_diff, r*row_diff, width_diff, row_diff))
+
+        self.update = False
+
+    # ----------- Callable Functions
+    def warp(self, event, direction):
+        debug("Unfinished Function", 1)
+
+    def grow(self, event, direction):
+        debug("Unfinished Function", 1)
+
+    def shuffle(self, event, direction):
+        debug("Unfinished Function", 1)
+
+    def select_screen(self, event, n, toggle=True):
+        """Change the virtual screen to `n`"""
+
+        if toggle:
+            if self.current_screen == n:
+                n = self.previous_screen
+            self.previous_screen = self.current_screen
+
+        self.current_screen = n
+
+        self.layout[self.previous_screen].hide()
+        self.layout[self.current_screen].show()
+
+    def move_to_screen(self, event, n, *args):
+        if self.current_screen == n:  # You cannot move to your current screen
+            return
+
+        win = event.child
+
+        screen = self.get_screen()
+        window, height = screen.remove(win)
+        if window is None:
+            debug("Window could not be retrieved", 2)
+            return
+        screen.hide()
+        self.set_screen(screen)
+
+        self.current_screen = n
+
+        new_screen = self.get_screen()
+
+        new_screen = new_screen.add(window)
+        new_screen.show()
+        new_screen.tile()
+        self.set_screen(new_screen)
+
+    def destroy_window(self, event, window=None):
+        """Kill the window WINDOW."""
+
+        if window is None:
+            window = event.child
+
+        screen = self.get_screen()
+        try:
+            [window, height] = screen.remove(window)
+            window.destroy()
+            self.update = True
+            self.set_screen(screen)
+        except:
+            debug("Window is not here", 2)
+
+    def left(self, event):
+        self.get_screen().column -= 1
+        self.get_screen().update()
+
+    def down(self, event):
+        self.get_screen().row += 1
+        self.get_screen().update()
+
+    def up(self, event):
+        self.get_screen().row -= 1
+        self.get_screen().update()
+
+    def right(self, event):
+        self.get_screen().column += 1
+        self.get_screen().update()
+
+    def cmd(self, event, *args):
+        """Perform a command"""
+        command = "".join(args)
+        subprocess.Popen(command.split())
+
+    def restart(self, event):
+        os.execv(sys.argv[0], sys.argv)
+
+    def exit(self, event, *args, **kwargs):
+        self.running = False
+
+    # ----------- Main Loop
+    def loop(self):
+        while self.running:
+            event = self.display.next_event()
+            if event.type in self.EVENT_HANDLER:
+                handler = getattr(self, self.EVENT_HANDLER[event.type], None)
+                if handler:
+                    try:
+                        handler(event)
+                    except Exception as err:
+                        debug(str(err), 3)
+                        traceback.print_tb(err.__traceback__)
+
+                    if self.update:
+                        self.tile()
+
+
+
+debug("Starting the Window Manager...", 0)
+wm = WM()
+wm.loop()
