@@ -343,6 +343,68 @@ class WM:
 
         self.update = False
 
+    def add(self, window):
+        """Add window to screen"""
+        screen = self.get_screen()
+        if window in screen.get_windows():
+            debug("Window already exists.", 4)
+            return
+
+        if len(screen.layout) == 0:
+            screen.layout = [[[[window, None]], None]]
+        elif len(screen.layout) == 1:  # At least one window present in one column, will create a second.
+            screen.layout.append([[[window, None]], None])
+        else:
+            screen.column, screen.row = screen.get_closest_position(screen.column, screen.row)
+            col, row = screen.column, screen.row  # col can be 0 or 1
+            old_layout, height = screen.layout[col].copy()
+
+            if not 0 <= row <= len(old_layout) - 1:  # Current position is invalid
+                screen.layout[col] = [old_layout.append([window, None]), height]
+
+            else:
+                screen.layout[col] = [[*old_layout[:row], [window, None], *old_layout[row:]], height]
+
+    def remove(self):
+        """Remove window from the screen"""
+        screen = self.get_screen()
+        remove = [None, None]
+
+        if window in screen.get_windows():
+            tmp_layout = []
+
+            for col, width in screen.layout:
+                tmp_col = []
+                for win, height in col:
+                    if win != window:
+                        tmp_col.append([win, height])
+                    else:
+                        remove = [win, height]
+
+                if tmp_col != []:
+                    tmp_layout.append([tmp_col, width])
+
+            screen.layout = tmp_layout
+
+            if remove is None:
+                debug("Window is here but not removed", 3)
+
+            # screen.tile()
+        else:
+            debug("Window is not here.", 2)
+
+        return remove
+
+    def update(self):
+        """Update the wm"""
+        screen = self.get_screen()
+        screen.column, screen.row = screen.get_closest_position(screen.column, screen.row)
+        win = screen.get_window_from_position(screen.column, screen.row)
+        if win != []:
+            g = win.get_geometry()
+            win.warp_pointer(g.width//2, g.height//2)
+            win.set_input_focus(X.RevertToParent, 0)
+
     # ----------- Callable Functions
     def warp(self, event, direction):
         debug("Unfinished Function", 1)
