@@ -128,7 +128,7 @@ class Screen:
 
         return [col, row]
 
-    def get_window_from_position(self, col, row, get_height=False):
+    def get_window_from_position(self, col, row):
         """Return a window from a position"""
         if not self.get_windows():
             return debug("No windows present", 2)
@@ -136,8 +136,6 @@ class Screen:
         col, row = self.get_closest_position(col, row)
 
         window, height = self.layout[col][0][row]
-        if get_height:
-            return window, height
         return window
 
     def get_position_from_window(self, window):
@@ -159,71 +157,44 @@ class Screen:
         if window in self.get_windows():
             debug("Window already exists.", 4)
             return
-        # if width is None:  # Check if any other width is present
-        #     width = 1 / len(screen.layout)
+
         if len(self.layout) == 0:
-            self.layout = [[[[window, 1]], 1]]
+            self.layout = [[[[window, None]], None]]
         elif len(self.layout) == 1:  # At least one window present in one column, will create a second.
-            # self.layout.append([[[window, None]], None])
-            first_row, _ = self.layout[0]
-            self.layout = [[first_row, 0.5], [[[window, 1]], 0.5]]
+            self.layout.append([[[window, None]], None])
         else:
             self.column, self.row = self.get_closest_position(self.column, self.row)
             col, row = self.column, self.row  # col can be 0 or 1
+            old_layout, height = self.layout[col].copy()
 
-            win_row, width = self.layout[col]
-            tmp_row = []
-            share_height = 1 / (len(win_row) + 1)
-            share_diff = share_height / len(win_row)
-            for i, (win, height) in enumerate(win_row):
-                tmp_row.append([win, height-share_diff])
-                if i == self.row:
-                    tmp_row.append([window, share_height])
-            self.layout[col] = [tmp_row, width]
+            if not 0 <= row <= len(old_layout) - 1:  # Current position is invalid
+                self.layout[col] = [old_layout.append([window, None]), height]
+
+            else:
+                self.layout[col] = [[*old_layout[:row], [window, None], *old_layout[row:]], height]
 
     def remove(self, window):
         """Remove window from the self"""
-        return self.old_remove(window)
-        if window not in self.get_windows():
-            return
         remove = [None, None]
-
-    def sanitize(self):
-        if len(self.layout) == 1:
-            # make the window same width
-            row, _ = self.layout[0]
-            self.layout[0] = [row, 1]
-
-    def old_remove(self, window):
-        """Remove window from the self"""
-        remove = [None, None]
-        sanitize = False
 
         if window in self.get_windows():
             tmp_layout = []
 
             for col, width in self.layout:
                 tmp_col = []
-                win_col, win_row = self.get_position_from_window(window)
-                _, height_diff = self.get_window_from_position(win_col, win_row, get_height=True)
-                height_diff /= (len(col[0]) - 1)
                 for win, height in col:
                     if win != window:
-                        tmp_col.append([win, height-height_diff])
+                        tmp_col.append([win, height])
                     else:
                         remove = [win, height]
 
                 if tmp_col != []:
                     tmp_layout.append([tmp_col, width])
-                else:  # Sanitize width loss
-                    sanitize = True
 
             self.layout = tmp_layout
 
             if remove is None:
                 debug("Window is here but not removed", 3)
-            elif sanitize:
-                self.sanitize()
 
             # self.tile()
         else:
@@ -296,6 +267,40 @@ class WM:
         # Find and manage all existing windows on startup.
         for window in self.screen.root.query_tree().children:
             self.startup(window)
+            # moved = False
+            # name = window.get_wm_name()
+            # if not name:
+            #     wclass = window.query_tree().parent
+            #     name = wclass.get_wm_class()
+            #
+            # debug(name, 1)
+            #
+            # if name:
+            #     for rule, group in RULES.items():
+            #         if name.lower() in rule.lower():
+            #             debug(name, 0)
+            #             debug(group, 0)
+            #             moved = True
+            #             try:
+            #                 attributes = window.get_attributes()
+            #                 if attributes.override_redirect:
+            #                     debug("Attributes override")
+            #                     continue
+            #             except:
+            #                 debug("Could not get attributes, do not know severity.", 1)
+            #                 # continue
+            #             mask = X.EnterWindowMask | X.LeaveWindowMask
+            #             window.change_attributes(event_mask=mask)
+            #             window.unmap()
+            #             new_screen = self.get_screen(id=group)
+            #             new_screen.add(window)
+            #
+            #             continue
+            #     if moved:
+            #         continue
+            #
+            # if not moved:
+            #     self.manage_window(window)
 
     def startup(self, window):
         name = window.get_wm_name()
@@ -447,26 +452,6 @@ class WM:
             self.update = True
 
     def tile(self):
-        """Dynamic tiling, logic elsewhere"""
-        screen = self.get_screen()
-        last_width = 0
-        for row, width in screen.layout:
-            last_height = 0
-            for win, height in row:
-                win.configure(**self.unit_to_pixel(last_width, last_height, width, height))
-                last_height += height
-            last_width += width
-
-    def semi_tile(self):
-        """dynamic tiling"""
-        screen = self.get_screen()
-
-        n = len(screen.layout)
-        for i in range(n):
-            row, width = screen.layout[i]
-
-
-    def old_tile(self):
         """Fix dynamic tiling"""
 
         screen = self.get_screen()
@@ -475,32 +460,11 @@ class WM:
 
         if not n > 0:
             return
-        elif n == 1:
-            row, width = screen.layout[0]
-            master_win, master_height = row[screen.row]
-        elif n == 2:
-            _, width_1 = screen.layout[screen.row]
-            width_2 = 1 - width_1
-
-            last_width = 0
-            for i, (row, width) in enumerate(screen.layout):
-                last_height = 0
-                for n, (win, height) in enumerate(row):
-                    win.configure(**self.unit_to_pixel(last_width, last_height, width, height))
-                    last_height += height
-                last_width += width
-
-
 
         width_diff = 1 / n
 
         for i in range(n):
             row, width = screen.layout[i]
-            if width is None:  # Check if any other width is present
-                width = 1 / len(screen.layout)
-            # width -= 0.1
-            screen.layout[i] = [row, width]
-            width_diff = width
 
             row_n = len(row)
             row_diff = 1 / row_n  # This require row to be filled or handled by remove
@@ -535,7 +499,7 @@ class WM:
 
         self.get_screen().update()
 
-    def grow(self, event, direction, height_diff=0.05, width_diff=0.05):
+    def grow(self, event, direction):
         screen = self.get_screen()
         win = event.child
         col, row = screen.get_position_from_window(win)
@@ -548,47 +512,6 @@ class WM:
                     width = 1 / len(screen.layout)
                 width += 0.1
                 screen.layout[col] = [row, width]
-                self.update = True
-                # debug("someithing should happen")
-        elif direction == "right":
-            if col == 0:
-                row, width = screen.layout[col]
-                if width is None:  # Check if any other width is present
-                    width = 1 / len(screen.layout)
-                width -= 0.1
-                screen.layout[col] = [row, width]
-                self.update = True
-        elif direction == "up":
-            if 0 < row:
-                win_row, width = screen.layout[col]
-                new_win_row = []
-                for i, (win, height) in enumerate(win_row):
-                    if i == row - 1:
-                        height -= height_diff
-                        height = max(height, height_diff)
-                    if i == row:
-                        height += height_diff
-
-                    new_win_row.append([win, height])
-
-                screen.layout[col] = [new_win_row, width]
-        elif direction == "down":
-            win_row, width = screen.layout[col]
-            if row < len(win_row) - 1:
-                new_win_row = []
-                for i, (win, height) in enumerate(win_row):
-                    if i == row + 1:
-                        height -= height_diff
-                    if i == row:
-                        height += height_diff
-
-                    new_win_row.append([win, height])
-
-                screen.layout[col] = [new_win_row, width]
-
-
-        else:
-            debug("Unsupported direction: %s" % direction, 2)
 
         debug("Unfinished Function", 1)
 
@@ -617,6 +540,7 @@ class WM:
         new_screen = self.get_screen(id=group)
         new_screen.add(window)
         window.unmap()
+
 
     def move_to_screen(self, event, n, *args, move_with=False):
         if self.current_screen == n:  # You cannot move to your current screen
@@ -662,25 +586,24 @@ class WM:
     def exit(self, event, *args, **kwargs):
         self.running = False
 
-
-
+    # ----------- Main Loop
+    def loop(self):
+        while self.running:
+            try:
+                event = self.display.next_event()
+                if event.type in self.EVENT_HANDLER:
+                    handler = getattr(self, self.EVENT_HANDLER[event.type], None)
+                    if handler:
+                        handler(event)
+                        if self.update:
+                            self.tile()
+            except Exception as err:
+                print("\n")
+                traceback.print_tb(err.__traceback__)
+                debug(str(err), 3)
 
 
 
 debug("Starting the Window Manager...", 0)
-
 wm = WM()
-
-while wm.running:  # Main Loop
-    try:
-        event = wm.display.next_event()
-        if event.type in wm.EVENT_HANDLER:
-            handler = getattr(wm, wm.EVENT_HANDLER[event.type], None)
-            if handler:
-                handler(event)
-                if wm.update:
-                    wm.tile()
-    except Exception as err:
-        print("\n")
-        traceback.print_tb(err.__traceback__)
-        debug(str(err), 3)
+wm.loop()
