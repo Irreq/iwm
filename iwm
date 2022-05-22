@@ -1,283 +1,155 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# File name: iwm
-# Description: Irreqs Window Manager - A Simple Tiling WM With a Column Layout
-# Author: irreq (irreq@protonmail.com)
-# Date: 03/03/2022
-
-"""Documentation:
---------------------------------------------------------------------------------
-TODO:
-    * Fix grow functions for windows
+import os
+import re
+import subprocess
+import sys
+import time
+import traceback
+import logging
 
 
---------------------------------------------------------------------------------
-Known Bugs:
-0 - `VIRTUAL_SCREENS` must be more than one letter or switching is impossible.
+#Creating and Configuring Logger
 
+Log_Format = "%(levelname)s %(asctime)s - %(message)s"
 
-"""
+logging.basicConfig(filename = "/tmp/logfile_wm.log",
+                    filemode = "w",
+                    format = Log_Format,
+                    level = logging.ERROR)
+
+logger = logging.getLogger()
 
 from Xlib import X, display, XK
 
-import subprocess
-import os
-import sys
-import signal
-import datetime, traceback  # Debugging
+"""
+Setup: chmod +x wm.py
+Testing: Xephyr -resizeable :1 & DISPLAY=:1 /home/irreq/github/programs/wm.py
+"""
 
-# ----------- Config
-VIRTUAL_SCREENS = "asdfgzxcv"
-
-RULES = {  # Case sensitive groups
-    "Alacritty": "g",
-    "Firefox": "s",
-    "Atom": "d",
-}
-
-# Keys
-Mod = (1<<6)  # Super (mod4), aka "Windows" key
+Mod4 = (1<<6)  # Super (mod4), aka "Windows" key
 Control = (1<<2)
 Shift = (1<<0)
 
-keybinds = {  # (`Modifier` and `Key`) -> operation and/or arguments
-    (Mod, "h"): ["warp", "left"],
-    (Mod, "j"): ["warp", "down"],
-    (Mod, "k"): ["warp", "up"],
-    (Mod, "l"): ["warp", "right"],
-    (Mod | Control, "h"): ["grow", "left"],
-    (Mod | Control, "j"): ["grow", "down"],
-    (Mod | Control, "k"): ["grow", "up"],
-    (Mod | Control, "l"): ["grow", "right"],
-    (Mod | Shift, "h"): ["shuffle", "left"],
-    (Mod | Shift, "j"): ["shuffle", "down"],
-    (Mod | Shift, "k"): ["shuffle", "up"],
-    (Mod | Shift, "l"): ["shuffle", "right"],
+# (`Mod4ifier` and `Key`) -> operation XOR arguments
 
-    (Mod | Shift, "q"): "destroy_window",
-    (Mod | Shift, "e"): "exit",
-    (Mod | Shift, "r"): "restart",
+keybinds = {
+    (Mod4, "h"): ["warp", "left"],
+    (Mod4, "j"): ["warp", "down"],
+    (Mod4, "k"): ["warp", "up"],
+    (Mod4, "l"): ["warp", "right"],
+    (Mod4 | Control, "h"): ["grow", "left"],
+    (Mod4 | Control, "j"): ["grow", "down"],
+    (Mod4 | Control, "k"): ["grow", "up"],
+    (Mod4 | Control, "l"): ["grow", "right"],
+    (Mod4 | Shift, "h"): ["shuffle", "left"],
+    (Mod4 | Shift, "j"): ["shuffle", "down"],
+    (Mod4 | Shift, "k"): ["shuffle", "up"],
+    (Mod4 | Shift, "l"): ["shuffle", "right"],
+    # (Mod4 | Shift, "t"): "tile_all_windows",
 
-    (Mod, "Return"): ["cmd", "/usr/bin/alacritty"],
-    (Mod, "o"): ["cmd", "/usr/bin/dmenu_run"],
+    (Mod4 | Shift, "q"): "cb_destroy_window",
+    (Mod4 | Shift, "e"): "exit",
+    (Mod4 | Shift, "r"): "restart",
+    (Mod4 | Shift, "v"): "cb_focus_next_window",
 
-    (Mod, "comma"): ["cmd", "amixer -q sset Master 10%-"],
-    (Mod, "period"): ["cmd", "amixer -q sset Master 10%+"],
-    (Mod, "minus"): ["cmd", "/usr/bin/audio.py toggle"],
+    (Mod4, "Return"): ["cmd", "/usr/bin/alacritty"],
+    (Mod4, "o"): ["cmd", "/usr/bin/dmenu_run"],
+    (Mod4, "u"): "cb_raise_or_lower_window",
+
+
+    (Mod4, "comma"): ["cmd", "amixer -q sset Master 10%-"],
+    (Mod4, "period"): ["cmd", "amixer -q sset Master 10%+"],
+    # (Mod4, "minus"): ["cmd", "/usr/bin/audio.py toggle"],
+    (Mod4, "minus"): ["cmd", "/home/irreq/github/programs/pac.py toggle"],
 }
 
-# Assign keybind to virtual screen.
-for key in VIRTUAL_SCREENS:
-    keybinds[(Mod, key)] = ["select_screen", key]
-    keybinds[(Mod | Shift, key)] = ["move_to_screen", key]
-
-# ----------- Functions
-def debug(data, severity):
-    """Debug system.
-
-    severity chart:
-
-    0 -> Success
-    1 -> Notice
-    2 -> Warning
-    3 -> Error
-    """
-
-    caller = sys._getframe().f_back.f_code.co_name
-    severity_table = {0: "\x1b[32m[SUCCESS]\x1b[0m",  # Green
-                      1: "\x1b[34m[NOTICE]\x1b[0m",  # Blue
-                      2: "\x1b[33m[WARNING]\x1b[0m",  # Yellow
-                      3: "\x1b[31m[ERROR]\x1b[0m"}  # Red
-
-    msg = (severity_table[severity], str(datetime.datetime.now()), data, caller)
-    print('\n%s %s -> "%s" @ %s' % msg)
-    return None
-
-def closest(lst, n):
-    """Return 0 if list is empty"""
-    aux = []
-    lst.append(0)
-    for valor in lst:
-        aux.append(abs(n-valor))
-    return lst[aux.index(min(aux))]
+# Assign keybind to virtual screen. Mod + Key -> screen N
+for key in range(10):
+    keybinds[(Mod4, str(key))] = ["select_screen", key]
+    keybinds[(Mod4 | Shift, str(key))] = ["move_to_screen", key]
 
 
-# ----------- Classes
-class Screen:
-    """
-    `self.layout` -> list(
-        [[(<win1>, {...}), (<win2>, {...})], `width`],  # First Column
-        [[(<win3>, {...}), (<win4>, {...})], `width`])  # Second Column
-    """
+Y_OFFSET = 8
+PNT_OFFSET = 16
+DRAG_THRESH = 16
+DRAG_MAX_FPS = 30
+MIN_WIN_SIZE = 16
+BOUNCE_RATIO = 1 / 8
+MAX_VSCREEN = 10
 
-    layout = []
-    column = 0
-    row = 0
-
-    def __init__(self, **entries):
-        self.__dict__.update(entries)
-
-    def get_closest_position(self, col, row):
-        """Return closest possible position to `col` and `row`"""
-        col = closest(list(range(len(self.layout))), col)
-        try:
-            row = closest(list(range(len(self.layout[col][0]))), row)
-        except:  # No more rows are present
-            row = 0
-
-        return [col, row]
-
-    def get_window_from_position(self, col, row, get_height=False):
-        """Return a window from a position"""
-        if not self.get_windows():
-            return debug("No windows present", 2)
-
-        col, row = self.get_closest_position(col, row)
-
-        window, height = self.layout[col][0][row]
-        if get_height:
-            return window, height
-        return window
-
-    def get_position_from_window(self, window):
-        """Return position for window on screen."""
-        if window not in self.get_windows():
-            return debug("Window: %s is not here." % (str(window)))
-
-        for column, (col, width) in enumerate(self.layout):
-            for row, (win, height) in enumerate(col):
-                if win == window:
-                    return column, row
-
-    def get_windows(self):
-        """Return a list of windows on screen"""
-        return [win for (col, width) in self.layout for (win, height) in col]
-
-    def add(self, window):
-        """Add window to self"""
-        if window in self.get_windows():
-            debug("Window already exists.", 4)
-            return
-        # if width is None:  # Check if any other width is present
-        #     width = 1 / len(screen.layout)
-        if len(self.layout) == 0:
-            self.layout = [[[[window, 1]], 1]]
-        elif len(self.layout) == 1:  # At least one window present in one column, will create a second.
-            # self.layout.append([[[window, None]], None])
-            first_row, _ = self.layout[0]
-            self.layout = [[first_row, 0.5], [[[window, 1]], 0.5]]
-        else:
-            self.column, self.row = self.get_closest_position(self.column, self.row)
-            col, row = self.column, self.row  # col can be 0 or 1
-
-            win_row, width = self.layout[col]
-            tmp_row = []
-            share_height = 1 / (len(win_row) + 1)
-            share_diff = share_height / len(win_row)
-            for i, (win, height) in enumerate(win_row):
-                tmp_row.append([win, height-share_diff])
-                if i == self.row:
-                    tmp_row.append([window, share_height])
-            self.layout[col] = [tmp_row, width]
-
-    def remove(self, window):
-        """Remove window from the self"""
-        return self.old_remove(window)
-        if window not in self.get_windows():
-            return
-        remove = [None, None]
-
-    def sanitize(self):
-        if len(self.layout) == 1:
-            # make the window same width
-            row, _ = self.layout[0]
-            self.layout[0] = [row, 1]
-
-    def old_remove(self, window):
-        """Remove window from the self"""
-        remove = [None, None]
-        sanitize = False
-
-        if window in self.get_windows():
-            tmp_layout = []
-
-            for col, width in self.layout:
-                tmp_col = []
-                win_col, win_row = self.get_position_from_window(window)
-                _, height_diff = self.get_window_from_position(win_col, win_row, get_height=True)
-                height_diff /= (len(col[0]) - 1)
-                for win, height in col:
-                    if win != window:
-                        tmp_col.append([win, height-height_diff])
-                    else:
-                        remove = [win, height]
-
-                if tmp_col != []:
-                    tmp_layout.append([tmp_col, width])
-                else:  # Sanitize width loss
-                    sanitize = True
-
-            self.layout = tmp_layout
-
-            if remove is None:
-                debug("Window is here but not removed", 3)
-            elif sanitize:
-                self.sanitize()
-
-            # self.tile()
-        else:
-            debug("Window is not here.", 2)
-
-        return remove
-
-    def update(self):
-        """Update the wm"""
-        self.column, self.row = self.get_closest_position(self.column, self.row)
-        win = self.get_window_from_position(self.column, self.row)
-        if win != []:
-            g = win.get_geometry()
-            win.warp_pointer(g.width//2, g.height//2)
-            win.set_input_focus(X.RevertToParent, 0)
-
-    def hide(self):
-        for win in self.get_windows():
-            win.unmap()
-
-    def show(self):
-        for win in self.get_windows():
-            win.map()
+EVENT_HANDLER = {
+    X.KeyPress: 'handle_keypress',
+    X.ButtonPress: 'handle_button_press',
+    X.MotionNotify: 'handle_motion_notify',
+    X.ButtonRelease: 'handle_button_release',
+    X.MapRequest: 'handle_map_request',
+    X.ConfigureRequest: 'handle_configure_request',
+    X.UnmapNotify: 'handle_unmap_notify',
+    X.EnterNotify: 'handle_enter_notify',
+    X.DestroyNotify: 'handle_destroy_notify',
+    X.MapNotify: 'handle_map_notify',
+}
 
 
-class WM:
-    """Main Window Manager Class"""
-    EVENT_HANDLER =  {
-        X.KeyPress: '_handle_keypress',
-        X.MapRequest: '_handle_map_request',
-        X.ConfigureRequest: '_handle_configure_request',
-        X.MapNotify: '_handle_map_notify',
-        X.UnmapNotify: '_handle_unmap_notify',
-        X.EnterNotify: '_handle_enter_notify',
-        X.DestroyNotify: '_handle_destroy_notify',
-    }
+LAYOUT_OFFSET = 0
+# regexp: [x, y, width, height]
+LAYOUT_RULES = {
+    r'alacritty|kitty|st|xterm|rxvt': [.5, .3, .5, .7],
+    r'ide|atom|eclipse|emacs': [0, 0, .5 - LAYOUT_OFFSET, 1],
+    r'firefox|chrom(e|ium)|midori':
+    [.5 - LAYOUT_OFFSET, 0, .5 + LAYOUT_OFFSET, 1],
+    r'pdf|dvi|office|mathematica|libre|atom|ide':
+    [.5 - LAYOUT_OFFSET, 0, .5 + LAYOUT_OFFSET, 1],
+}
 
-    key_handlers = {}
-    running = True
-    update = False
+# [x, y, width, height] of south-east, north-east, south-west, north-west windows
+QUARTER_GEOMETRIES = [[.5, .5, .5, .5], [.5, 0, .5, .5], [0, .5, .5, .5],
+                      [0, 0, .5, .5]]
 
-    # ----------- Initiation
+
+def debug(fmt, *args):
+    if args:
+        msg = '** debug: ' + fmt % args
+    else:
+        msg = '** debug: ' + fmt
+    i = msg.find(' ->')
+    if i >= 0:
+        msg = msg[0:i] + (' ' * (50 - i)) + msg[i:]
+    # print(msg, file=sys.stderr)
+    logger.error(msg)
+
+def error(fmt, *args):
+    if args:
+        print('** error:', fmt % args, file=sys.stderr)
+    else:
+        print('** error:', fmt, file=sys.stderr)
+
+class WindowManager():
+    managed_windows = []
+    exposed_windows = []
+    current_vscreen = 1
+    window_vscreen = {}
+
+    geometries = {}
+    last_raised_window = None
+
+    drag_window = None
+    drag_button = None
+    drag_geometry = None
+    drag_start_xy = None
+    drag_last_time = 0
     def __init__(self):
-        signal.signal(signal.SIGINT, self.exit)  # Exit gracefully
-        signal.signal(signal.SIGTERM, self.exit)
-
+        # X server display & screen
         self.display = display.Display()
         self.screen = self.display.screen()
 
-        # Configure the root window to receive all events.
         mask = (X.SubstructureRedirectMask | X.SubstructureNotifyMask
                 | X.EnterWindowMask | X.LeaveWindowMask | X.FocusChangeMask)
-
         self.screen.root.change_attributes(event_mask=mask)
+
+        self.key_handlers = {}
 
         # Configure the root window to receive key inputs defined in `keybinds`.
         for modifier, key in keybinds:
@@ -286,52 +158,428 @@ class WM:
                                       X.GrabModeAsync)
             self.key_handlers[(modifier, code)] = (key, keybinds[(modifier, key)])
 
-        # Initiate virtual screens
-        self.layout = {key:Screen() for key in VIRTUAL_SCREENS}
+        # Configure the root window to receive mouse button events.
+        for button in [1, 3]:
+            self.screen.root.grab_button(button, X.Mod4Mask, True,
+                                         X.ButtonPressMask, X.GrabModeAsync,
+                                         X.GrabModeAsync, X.NONE, X.NONE)
+    # ---------------- X wrapper functions
+    def is_alive_window(self, window):
+        """Check if the window WINDOW do exist."""
+        windows = self.screen.root.query_tree().children
+        return window in windows
 
-        self.current_screen = VIRTUAL_SCREENS[0]  # First screen
-        # Prohibits switch loop
-        self.previous_screen = VIRTUAL_SCREENS[-1]  # Requires more than one virtual screen
+    def get_window_class(self, window):
+        """Fetch the WM_CLASS window property of the window WINDOW and return
+        the class part of the property.  Return empty string if class is not
+        retrieved."""
+        try:
+            cmd, cls = window.get_wm_class()
+        except:
+            return ''
+        if cls is not None:
+            return cls
+        else:
+            return ''
 
-        # Find and manage all existing windows on startup.
-        for window in self.screen.root.query_tree().children:
-            self.startup(window)
+    def get_window_geometry(self, window):
+        """Obtain the geometry and attributes of the window WINDOW.  Return as
+        a Xlib.protocol.rq.Struct object.  Valid attributes are x, y, width,
+        height, root, depth, border_width, and sequence_number.  Return None
+        if the geometry is not retrieved."""
+        try:
+            return window.get_geometry()
+        except:
+            return None
 
-    def startup(self, window):
-        name = window.get_wm_name()
-        if not name:
-            wclass = window.query_tree().parent
-            name = wclass.get_wm_class()
+    def get_window_attribute(self, window):
+        try:
+            return window.get_attributes()
+        except:
+            return None
 
-        if name:
-            for rule, group in RULES.items():
-                if name.lower() in rule.lower():
-                    debug(name, 0)
-                    debug(group, 0)
-                    moved = True
-                    try:
-                        attributes = window.get_attributes()
-                        if attributes.override_redirect:
-                            debug("Attributes override")
-                            continue
-                    except:
-                        debug("Could not get attributes, do not know severity.", 1)
-                        # continue
-                    mask = X.EnterWindowMask | X.LeaveWindowMask
-                    window.change_attributes(event_mask=mask)
-                    # window.unmap()
-                    new_screen = self.get_screen(id=group)
-                    new_screen.add(window)
-                    new_screen.hide()
-                    print("added window lol")
-                    return
+    def window_shortname(self, window):
+        return '0x{:x} [{}]'.format(window.id, self.get_window_class(window))
 
-        # if not moved:
-        print("%s will be managed." % name)
-        self.manage_window(window)
+    def get_screen_size(self):
+        """Return the dimension (WIDTH, HEIGHT) of the current screen as a
+        tuple in pixels.  If xrandr command exsits and either DP (DisplayPort)
+        or HDMI output is active, return its dimensionn instead of the screen
+        size of the current X11 display."""
+        width, height = self.screen.width_in_pixels, self.screen.height_in_pixels
+        return width, height
 
-    # ----------- Event handlers
-    def _handle_keypress(self, event):
+    def get_usable_screen_size(self):
+        """Return the dimensionn (WIDTH, HEIGHT) of the usable screen are
+        (i.e., the area of the current screen excluding the are for displaying
+        status monitor using, for example, xpymon."""
+        width, height = self.get_screen_size()
+        debug('get_usable_screen_size -> w:%d h:%d', width, height)
+        return width, height
+
+    # ---------------- window manager functions
+    def is_managed_window(self, window):
+        """Check if the window WINDOW is under the control of the window
+        manager."""
+        return window in self.managed_windows
+
+    def convert_geomtry(self, x, y, width, height, as_dict=True):
+        """Convert a geometry X, Y, WIDTH and HEIGHT from the unit coordinate
+        to the pixel coordinate.  For instance, the point (0.5, 1.0) in the
+        unit coordinate is mapped to the mid-bottom (i.e., south) of the
+        screen.  Return as a tuple by default.  If AS_DICT is True, return as
+        a dictionary with keys `x', `y', `width' and `height'."""
+        screen_width, screen_height = self.get_usable_screen_size()
+        px = int(screen_width * x)
+        py = int(screen_height * y)
+        pwidth = int(screen_width * width)
+        pheight = int(screen_height * height)
+        debug('convert_geomtry: x=%s y=%s w=%s h=%s -> x:%s y:%s w:%s h:%s', x,
+              y, width, height, px, py, pwidth, pheight)
+        if as_dict:
+            return {'x': px, 'y': py, 'width': pwidth, 'height': pheight}
+        else:
+            return px, py, pwidth, pheight
+
+    def manage_window(self, window):
+        """The window WINDOW is put under the control of the window manager.
+        The window is forced to be mapped on the current virtual screen.  The
+        geometry of the window is unchnaged."""
+        attrs = self.get_window_attribute(window)
+        if attrs is None:
+            return
+        # skip if the window should not be intercepted by window manager
+        if attrs.override_redirect:
+            return
+        # skip if the window is under our control
+        if self.is_managed_window(window):
+            return
+
+        debug('manage_window: %s', self.window_shortname(window))
+        self.managed_windows.append(window)
+        self.exposed_windows.append(window)
+        self.window_vscreen[window] = self.current_vscreen
+
+        # automatically layout the window if rule is found
+        geom_dict = self.find_geometry_by_rules(window)
+        if geom_dict is not None:
+            window.configure(**geom_dict)
+
+        window.map()
+        mask = X.EnterWindowMask | X.LeaveWindowMask
+        window.change_attributes(event_mask=mask)
+
+    def unmanage_window(self, window):
+        """The window WINDOW leaves from the control of the window manager."""
+        if self.is_managed_window(window):
+            debug('unmanage_window: %s', self.window_shortname(window))
+            if window in self.managed_windows:
+                self.managed_windows.remove(window)
+            if window in self.exposed_windows:
+                self.exposed_windows.remove(window)
+            del self.window_vscreen[window]
+
+    def raise_window(self, window):
+        """Make the window WINDOW above all other windows."""
+        if not self.is_managed_window(window):
+            return
+        window.configure(stack_mode=X.Above)
+        self.last_raised_window = window
+
+    def lower_window(self, window):
+        """Lower the window WINDOW among all other windows."""
+        if not self.is_managed_window(window):
+            return
+        window.configure(stack_mode=X.Below)
+        if self.last_raised_window == window:
+            self.last_raised_window = None
+
+    def raise_or_lower_window(self, window):
+        """Raise or lower the window WINDOW.  Toggle the mode of operation at
+        every invokation."""
+        if self.last_raised_window == window:
+            self.lower_window(window)
+        else:
+            self.raise_window(window)
+
+    def focus_window(self, window):
+        """Activate the input to the window WINDOW and the window frame is
+        displayed."""
+        if not self.is_managed_window(window):
+            return
+
+        # FIXME: simple hack to remove missing window
+        if not self.is_alive_window(window):
+            return
+
+        # FIXME: called two times? might be redundant
+        debug('focus_window: %s', self.window_shortname(window))
+        window.set_input_focus(X.RevertToParent, 0)
+
+    def focus_next_window(self, window=None):
+        """Change the active window from the window WINDOW to the next one.
+        The active window is raised and focused.  The pointer is moved to the
+        north-west of the window."""
+        def _sort_key(window):
+            geom = self.get_window_geometry(window)
+            if geom is None:
+                return 100000000
+            else:
+                return geom.x * 10000 + geom.y
+
+        # sort active windows with their geometries
+        windows = sorted(self.exposed_windows, key=_sort_key)
+        try:
+            i = windows.index(window)
+            next_window = windows[(i + 1) % len(windows)]
+        except ValueError:
+            if windows:
+                next_window = windows[0]
+            else:
+                return
+        next_window.raise_window()
+        next_window.warp_pointer(PNT_OFFSET, PNT_OFFSET)
+        self.focus_window(next_window)
+
+    def is_maximized(self, window):
+        """Check if the window WINDOW seems to have been maximized."""
+        geom = self.get_window_geometry(window)
+        if geom is None:
+            return False
+        width, height = self.get_usable_screen_size()
+        if geom.x == 0 and geom.width == width:
+            return True
+        if geom.y == Y_OFFSET and geom.height == height:
+            return True
+        return False
+
+    def save_window_geometry(self, window):
+        """Save the current geometry of the window WINDOW."""
+        geom = self.get_window_geometry(window)
+        if geom is None:
+            return
+        self.geometries[window] = {
+            'x': geom.x, 'y': geom.y, 'width': geom.width, 'height':
+            geom.height
+        }
+
+    def load_window_geometry(self, window):
+        """Return the saved geometry of the window WINDOW.  If not saved yet,
+        return None."""
+        return self.geometries.get(window, None)
+
+    def maximize_window(self, window, horizontally=True, vertically=True):
+        """Resize the geometry of the window WINDOW to cover the screen
+        horizontally and/or vertically."""
+        screen_width, screen_height = self.get_usable_screen_size()
+        geom = self.get_window_geometry(window)
+        if geom is None:
+            return
+        x, y = geom.x, geom.y
+        width, height = geom.width, geom.height
+        if horizontally:
+            x, width = 0, screen_width
+        if vertically:
+            y, height = Y_OFFSET, screen_height
+        window.configure(x=x, y=y, width=width, height=height)
+        window.warp_pointer(PNT_OFFSET, PNT_OFFSET)
+
+    def is_terminal_window(self, window):
+        """Check if the window WINDOW seems to be a terminal emulator."""
+        cls = self.get_window_class(window)
+        return 'xterm' in cls.lower()
+
+    def find_geometry_by_rules(self, window):
+        """Look through the configuration variable LAYOUT_RULES and identify
+        the desired geometry (x, y, width, and height) of WINDOW.  The geometry is returned as
+        a dictionary.  Return None if no rule is found."""
+        debug('find_geometry_by_rules: %s', self.window_shortname(window))
+        cls = self.get_window_class(window)
+        cur_geom = self.get_window_geometry(window)
+        if cur_geom is None:
+            return None
+        screen_width, screen_height = self.get_usable_screen_size()
+        for regexp, geom in LAYOUT_RULES.items():
+            if re.search(regexp, cls, flags=re.IGNORECASE):
+                debug("  rule found -> '%s': %s", regexp, geom)
+                # toggle the location of office applications
+                if 'office' in regexp and cur_geom.x > screen_width / 4:
+                    geom = [0, 0, .5 + LAYOUT_OFFSET, 1]
+                return self.convert_geomtry(*geom)
+        return None
+
+    def layout_window(self, window, quarter=None):
+        """Resize and move the window WINDOW based on predefined rules.  If
+        QUARTER is specified, the window is placed so that the exact quarter
+        of the screen is occupied.  Otherwise, the geometry is determined
+        based on rules specifed by the variable
+        `LAYOUT_RULES'."""
+        debug('layout_window: %s q=%s', self.window_shortname(window), quarter)
+        if quarter is not None:
+            geom = QUARTER_GEOMETRIES[quarter % 4]
+            window.configure(**self.convert_geomtry(*geom))
+            return True
+        else:
+            geom_dict = self.find_geometry_by_rules(window)
+            if geom_dict is not None:
+                window.configure(**geom_dict)
+                return True
+        return False
+
+    # FIXME: should make sure focus is not lost
+    def layout_all_windows(self, *args):
+        """Resize and move all windows on the current virtual screen according
+        to the rules specified in the variable `LAYOUT_RULES'.  However,
+        terminal windows are treated differently.  If there exists a single
+        terminal window, its geometry is determined by LAYOUT_RULES.  If there
+        are multiple terminal windows, every terminal window spans the quarter
+        of the screen, and terminal windows are placed from the bottom-right
+        corner in the counter-clockwise order."""
+        # count the number of terminal windows
+        debug('layout_all_windows')
+        nterms = sum( [1 for window in self.exposed_windows \
+                if self.is_terminal_window(window)])
+        term_count = 0
+        for window in self.exposed_windows:
+            if self.is_terminal_window(window) and nterms >= 2:
+                # layout every terminal to span the quarter of the screen
+                self.layout_window(window, quarter=term_count)
+                term_count += 1
+            else:
+                # layout according to the predefined rules
+                self.layout_window(window)
+
+    def tile_all_windows(self, *args):
+        debug('tile_all_windows')
+        """Resize and move all windows on the current virtual screen so that
+        all windows have the equal size."""
+        def _sort_key(window):
+            # force Emacs be the last in the window list
+            if 'emacs' in self.get_window_class(window).lower():
+                return 0x7fffffff
+            else:
+                # NOTE: new windows have larger IDs?
+                return window.id
+
+        windows = sorted(self.exposed_windows, key=_sort_key)
+        def gen_naive_layout(n):
+            """Divide a surface to similar number of rows and columns"""
+            sqrt = n ** 0.5
+            col = int(sqrt // 1 + (sqrt != sqrt // 1) * 1)
+            row = col + (n <= col ** 2 - col) * -1
+            return [col, row]
+
+        ncols, nrows = gen_naive_layout(len(windows))
+        for col in reversed(range(ncols)):
+            for row in reversed(range(nrows)):
+                if not windows:
+                    break
+
+                window = windows.pop(0)
+                x = 1 / ncols * col
+                y = 1 / nrows * row
+                width = 1 / ncols
+                height = 1 / nrows
+
+                if not windows:
+                    # the last window is stretched to fill the remaining area
+                    rest_height = 1 / nrows * row
+                    y -= rest_height
+                    height += rest_height
+
+                debug('  %s @ (%d, %d) -> x:%s y:%s w:%s h:%s',
+                      self.window_shortname(window), col, row, x, y, width,
+                      height)
+                window.configure(**self.convert_geomtry(x, y, width, height))
+
+    def select_vscreen(self, n):
+        """Change the virtual screen to N."""
+        debug('select_vscreen: %d', n)
+        self.current_vscreen = n
+        self.exposed_windows.clear()
+        for window in self.managed_windows:
+            if self.window_vscreen[window] == n:
+                window.map()
+                self.exposed_windows.append(window)
+            else:
+                window.unmap()
+
+    def toggle_vscreen(self, window):
+        """Send the window WINDOW to the next virtual screen.  The virtual
+        screen is toggled between 0 and 1."""
+        vscreen = (self.current_vscreen + 1) % 2
+        self.window_vscreen[window] = vscreen
+        self.select_vscreen(self.current_vscreen)
+
+    def destroy_window(self, window):
+        """Kill the window WINDOW."""
+        debug('destroy_window: %s', self.window_shortname(window))
+        if self.is_managed_window(window):
+            window.destroy()
+            self.unmanage_window(window)
+
+    # ---------------- callback functions
+    def cb_raise_or_lower_window(self, event):
+        window = event.child
+        self.raise_or_lower_window(window)
+
+    def cb_focus_next_window(self, event):
+        window = event.child
+        self.focus_next_window(window)
+
+    def cb_maximize_window(self, event, horizontally=True):
+        window = event.child
+        attrs = self.get_window_attribute(window)
+        if attrs is None:
+            return
+        # ignore if the window should not be intercepted by window manager
+        if attrs.override_redirect:
+            return
+        if self.is_maximized(window) and self.load_window_geometry(window):
+            window.configure(**self.load_window_geometry(window))
+            window.warp_pointer(PNT_OFFSET, PNT_OFFSET)
+        else:
+            self.save_window_geometry(window)
+            self.maximize_window(window, horizontally=horizontally)
+
+    def cb_maximize_window_vertically(self, event):
+        self.cb_maximize_window(event, horizontally=False)
+
+    def cb_destroy_window(self, event):
+        window = event.child
+        self.destroy_window(window)
+
+    def cb_toggle_vscreen(self, event):
+        window = event.child
+        self.toggle_vscreen(window)
+
+    def cb_prev_vscreen(self, event):
+        vscreen = self.current_vscreen
+        if vscreen > 0:
+            self.select_vscreen(vscreen - 1)
+
+    def cb_next_vscreen(self, event):
+        vscreen = self.current_vscreen
+        if vscreen < MAX_VSCREEN:
+            self.select_vscreen(vscreen + 1)
+
+    def select_screen(self, event, n):
+        if n != self.current_vscreen:
+            self.select_vscreen(n)
+
+    def move_to_screen(self, event, n, move_with=False):
+        if self.current_vscreen == n:
+            return
+
+        self.window_vscreen[event.child] = n
+
+        if move_with:
+            self.select_vscreen(n)
+        else:
+            self.select_vscreen(self.current_vscreen)
+
+    # ---------------- event handlers
+    def handle_keypress(self, event):
         """Event handler for KeyPress events."""
         key, entry = self.key_handlers.get((event.state, event.detail),(None, None))
         if entry:
@@ -346,13 +594,101 @@ class WM:
                 else:
                     method(event)
 
-    def _handle_map_request(self, event):
+    def handle_button_press(self, event):
+        """Initiate window repositioning with the button 1 or window resizing
+        with the button 3.  All mouse pointer motion events are captured until
+        the button is relased."""
+        window = event.child
+        self.screen.root.grab_pointer(
+            True, X.PointerMotionMask | X.ButtonReleaseMask, X.GrabModeAsync,
+            X.GrabModeAsync, X.NONE, X.NONE, 0)
+        self.drag_window = window
+        self.drag_button = event.detail
+        # FIXME: drag_geometry might be None
+        self.drag_geometry = self.get_window_geometry(window)
+        self.drag_start_xy = event.root_x, event.root_y
+
+    def handle_button_release(self, event):
+        """Terminate window repositioning/resizing."""
+        self.display.ungrab_pointer(0)
+
+    def _may_switch_virtual_screen(self, x, y):
+        """If the pointer position is close enogh to the vertical edges of the
+        screen, switch to the adjacent virtual screen.  The pointer position
+        is updated as if the pointer crossed the virtual screen edge."""
+        screen_width, screen_height = self.get_usable_screen_size()
+        # cross window across virtual screen boundary
+        if x >= screen_width - DRAG_THRESH:
+            if self.current_vscreen < MAX_VSCREEN:
+                self.window_vscreen[self.drag_window] += 1
+                self.select_vscreen(self.current_vscreen + 1)
+                self.screen.root.warp_pointer(int(screen_width * BOUNCE_RATIO),
+                                              y)
+        elif x <= DRAG_THRESH:
+            if self.current_vscreen > 0:
+                self.window_vscreen[self.drag_window] -= 1
+                self.select_vscreen(self.current_vscreen - 1)
+                self.screen.root.warp_pointer(
+                    int(screen_width * (1 - BOUNCE_RATIO)), y)
+
+    def handle_motion_notify(self, event):
+        """Reposition or resize the current window according to the current
+        pointer position.  The maximum rate of repositioning and resizeing is
+        bounded by DRAG_MAX_FPS."""
+        x, y = event.root_x, event.root_y
+        # prevent to reposition window too frequently
+        if time.time() - self.drag_last_time <= 1 / DRAG_MAX_FPS:
+            return
+        self.drag_last_time = time.time()
+
+        dx = x - self.drag_start_xy[0]
+        dy = y - self.drag_start_xy[1]
+
+        if self.drag_button == 1:
+            # reposition
+            self.drag_window.configure(x=self.drag_geometry.x + dx,
+                                       y=self.drag_geometry.y + dy)
+            # dragging further might switch the virtual screen
+            self._may_switch_virtual_screen(x, y)
+        else:
+            # resize
+            self.drag_window.configure(
+                width=max(MIN_WIN_SIZE, self.drag_geometry.width + dx),
+                height=max(MIN_WIN_SIZE, self.drag_geometry.height + dy))
+
+    def handle_map_request(self, event):
         """Event handler for MapRequest events."""
         window = event.window
-        window.map()
+        self.manage_window(window)
+        window.warp_pointer(PNT_OFFSET, PNT_OFFSET)
+        self.focus_window(window)
+
+    def handle_unmap_notify(self, event):
+        """Event handler for UnmapNotify events."""
+        window = event.window
+        if window in self.exposed_windows:
+            self.unmanage_window(window)
+
+    def handle_map_notify(self, event):
+        """Event handler for MapNotify events."""
+        window = event.window
+        if self.is_managed_window(window):
+            return
         self.manage_window(window)
 
-    def _handle_configure_request(self, event):
+    def handle_enter_notify(self, event):
+        """Event handler for EnterNotify events."""
+        window = event.window
+        if window in self.exposed_windows:
+            self.focus_window(window)
+            self.raise_window(window)
+
+    def handle_destroy_notify(self, event):
+        """Event handler for DestroyNotify events."""
+        window = event.window
+        self.unmanage_window(window)
+
+    def handle_configure_request(self, event):
         """Event handler for ConfigureRequest events."""
         window = event.window
         x, y = event.x, event.y
@@ -367,289 +703,38 @@ class WM:
         elif mask == 0b01000000:
             window.configure(event.stack_mode)
 
-        self.update = True
-
-    def _handle_map_notify(self, event):
-        """Event handler for MapNotify events."""
-        self.manage_window(event.window)
-
-    def _handle_unmap_notify(self, event):
-        """Event handler for UnmapNotify events."""
-        self.get_screen().remove(event.window)
-        self.update = True
-
-    def _handle_enter_notify(self, event):
-        """Event handler for EnterNotify events."""
-        window = event.window
-        if window in self.get_screen().get_windows():
-            window.set_input_focus(X.RevertToParent, 0)
-
-    def _handle_destroy_notify(self, event):
-        """Event handler for DestroyNotify events."""
-        window = event.window
-        self.unmanage_window(window)
-
-    # ----------- X wrapper functions
-    def is_alive_window(self, window):
-        """Check if the window WINDOW do exist."""
-        return window in self.screen.root.query_tree().children
-
-    def get_screen_size(self):
-        """Retrieve the dimensions of the screen"""
-        width, height = self.screen.width_in_pixels, self.screen.height_in_pixels
-        return width, height
-
-    def unit_to_pixel(self, x, y, width, height):
-        """Convert screen units to pixels"""
-        screen_width, screen_height = self.get_screen_size()
-
-        px = int(screen_width * x)
-        py = int(screen_height * y)
-
-        pwidth = int(screen_width * width)
-        pheight = int(screen_height * height)
-
-        return {'x': px, 'y': py, 'width': pwidth, 'height': pheight}
-
-    # ----------- Backend
-    def get_screen(self, id=None):
-        """Retrieve current screen object"""
-        return self.layout[id or self.current_screen]
-
-    def manage_window(self, window):
-
-        screen = self.get_screen()
-
-        if window in screen.get_windows(): # Skip if the window is mapped
-            debug("window is already mapped", 1)
-            return
-
-        try:
-            attributes = window.get_attributes()
-            if attributes.override_redirect:
-                return
-        except:
-            debug("Could not get attributes, do not know severity.", 1)
-            return
-
-        window.map()
-        mask = X.EnterWindowMask | X.LeaveWindowMask
-        window.change_attributes(event_mask=mask)
-        screen.add(window)
-        self.update = True
-        self.layout[self.current_screen] = screen
-
-    def unmanage_window(self, window):
-        screen = self.get_screen()
-        if window in screen.get_windows():
-            window, _ = screen.remove(window)
-            window.unmap()
-            self.update = True
-
-    def tile(self):
-        """Dynamic tiling, logic elsewhere"""
-        screen = self.get_screen()
-        last_width = 0
-        for row, width in screen.layout:
-            last_height = 0
-            for win, height in row:
-                win.configure(**self.unit_to_pixel(last_width, last_height, width, height))
-                last_height += height
-            last_width += width
-
-    def semi_tile(self):
-        """dynamic tiling"""
-        screen = self.get_screen()
-
-        n = len(screen.layout)
-        for i in range(n):
-            row, width = screen.layout[i]
-
-
-    def old_tile(self):
-        """Fix dynamic tiling"""
-
-        screen = self.get_screen()
-
-        n = len(screen.layout)
-
-        if not n > 0:
-            return
-        elif n == 1:
-            row, width = screen.layout[0]
-            master_win, master_height = row[screen.row]
-        elif n == 2:
-            _, width_1 = screen.layout[screen.row]
-            width_2 = 1 - width_1
-
-            last_width = 0
-            for i, (row, width) in enumerate(screen.layout):
-                last_height = 0
-                for n, (win, height) in enumerate(row):
-                    win.configure(**self.unit_to_pixel(last_width, last_height, width, height))
-                    last_height += height
-                last_width += width
-
-
-
-        width_diff = 1 / n
-
-        for i in range(n):
-            row, width = screen.layout[i]
-            if width is None:  # Check if any other width is present
-                width = 1 / len(screen.layout)
-            # width -= 0.1
-            screen.layout[i] = [row, width]
-            width_diff = width
-
-            row_n = len(row)
-            row_diff = 1 / row_n  # This require row to be filled or handled by remove
-
-            for r in range(row_n):
-                win, data = row[r]
-                win.configure(**self.unit_to_pixel(i*width_diff, r*row_diff, width_diff, row_diff))
-
-        self.update = False
-
-    def get_active_window(self):
-        """Retrieve current focused window's name"""
-        window = self.display.get_input_focus().focus
-        wmclass = window.get_wm_class()
-        if wmclass is None: #or wmname is None:
-            window = window.query_tree().parent
-            wmclass = window.get_wm_class()
-        return wmclass[1]
-
-    # ----------- Callable Functions
     def warp(self, event, direction):
-        if direction == "left":
-            self.get_screen().column -= 1
-        elif direction == "down":
-            self.get_screen().row += 1
-        elif direction == "up":
-            self.get_screen().row -= 1
-        elif direction == "right":
-            self.get_screen().column += 1
-        else:
-            return debug("Unknown direction: %s" % str(direction), 2)
+        window = event.window
 
-        self.get_screen().update()
+        data = self.screen.root.query_pointer()._data
+        x, y = data["root_x"], data["root_y"]
 
-    def grow(self, event, direction, height_diff=0.05, width_diff=0.05):
-        screen = self.get_screen()
-        win = event.child
-        col, row = screen.get_position_from_window(win)
-        if direction == "left":  # Require mouse to be on the right side
-            if col == len(screen.layout) - 1:
-                if col != 1:  # Fix this as it can only handle two col
-                    return
-                row, width = screen.layout[col]
-                if width is None:  # Check if any other width is present
-                    width = 1 / len(screen.layout)
-                width += 0.1
-                screen.layout[col] = [row, width]
-                self.update = True
-                # debug("someithing should happen")
-        elif direction == "right":
-            if col == 0:
-                row, width = screen.layout[col]
-                if width is None:  # Check if any other width is present
-                    width = 1 / len(screen.layout)
-                width -= 0.1
-                screen.layout[col] = [row, width]
-                self.update = True
-        elif direction == "up":
-            if 0 < row:
-                win_row, width = screen.layout[col]
-                new_win_row = []
-                for i, (win, height) in enumerate(win_row):
-                    if i == row - 1:
-                        height -= height_diff
-                        height = max(height, height_diff)
-                    if i == row:
-                        height += height_diff
+        candidates = {}
 
-                    new_win_row.append([win, height])
+        for window in self.exposed_windows:
+            geom = self.get_window_geometry(window)
+            if geom is None:
+                continue
 
-                screen.layout[col] = [new_win_row, width]
-        elif direction == "down":
-            win_row, width = screen.layout[col]
-            if row < len(win_row) - 1:
-                new_win_row = []
-                for i, (win, height) in enumerate(win_row):
-                    if i == row + 1:
-                        height -= height_diff
-                    if i == row:
-                        height += height_diff
+            cx = geom.x+geom.width//2
+            cy = geom.y+geom.height//2
 
-                    new_win_row.append([win, height])
+            d = direction
+            # Add window if it match the requirements
+            if (d == "left" and cx<x) or (d == "down" and cy>y) or (d == "up" and cy<y) or (d == "right" and cx>x):
+                eucleidian_distance = ((cx - x)**2 + (cy - y)**2)**0.5
+                candidates[eucleidian_distance] = window
 
-                screen.layout[col] = [new_win_row, width]
+        if candidates:  # Pick the closest window, if there are none, warp to current window
+            n = sorted(candidates)[0]
+            window = candidates[n]
+
+        g = window.get_geometry()
+        window.warp_pointer(g.width//2, g.height//2)
+        window.set_input_focus(X.RevertToParent, 0)
+        window.raise_window()
 
 
-        else:
-            debug("Unsupported direction: %s" % direction, 2)
-
-        debug("Unfinished Function", 1)
-
-    def shuffle(self, event, direction):
-        debug("Unfinished Function", 1)
-
-    def select_screen(self, event, n, toggle=True):
-        """Change the virtual screen to `n`"""
-
-        if toggle:
-            if self.current_screen == n:
-                n = self.previous_screen
-            self.previous_screen = self.current_screen
-
-        self.current_screen = n
-
-        self.layout[self.previous_screen].hide()
-        self.layout[self.current_screen].show()
-
-    def _move_to_screen(self, win, group):
-        screen = self.get_screen()
-        window, height = screen.remove(win)
-        if window is None:
-            debug("Window could not be retrieved", 2)
-            return
-        new_screen = self.get_screen(id=group)
-        new_screen.add(window)
-        window.unmap()
-
-    def move_to_screen(self, event, n, *args, move_with=False):
-        if self.current_screen == n:  # You cannot move to your current screen
-            return
-
-        win = event.child
-
-        screen = self.get_screen()
-        window, height = screen.remove(win)
-        if window is None:
-            debug("Window could not be retrieved", 2)
-            return
-
-        new_screen = self.get_screen(id=n)
-        new_screen.add(window)
-        window.unmap()
-
-        if move_with:
-            screen.hide()
-            self.current_screen = n
-            new_screen.show()
-
-        self.update = True
-
-    def destroy_window(self, event, window=None):
-        """Kill the window WINDOW."""
-
-        if window is None:
-            window = event.child
-
-        window, height = self.get_screen().remove(window)
-        window.destroy()
-        self.update = True
 
     def cmd(self, event, *args):
         """Perform a command"""
@@ -657,30 +742,53 @@ class WM:
         subprocess.Popen(command.split())
 
     def restart(self, event):
+        debug('restarting %s...', sys.argv[0])
         os.execv(sys.argv[0], sys.argv)
 
     def exit(self, event, *args, **kwargs):
-        self.running = False
+        debug('terminating...')
+        sys.exit()
 
+wm = WindowManager()
 
+# Acquire all present windows
 
+# Startup
+def startup():
+    import os
+    from random import choice
 
+    path = "/home/irreq/Pictures/Wallpapers/"
 
+    def set_wallpaper():
+        (_, _, filenames) = next(os.walk(path))
+        try:
+            name = choice(filenames)
+            query = "feh --no-fehbg --bg-scale '{}'".format(path + name)
+            os.system(query)
+            return name
+        except IndexError:
+            print("Empty directory")
 
-debug("Starting the Window Manager...", 0)
+    # if __name__ == "__main__":
+    set_wallpaper()
 
-wm = WM()
+startup()
 
-while wm.running:  # Main Loop
+for child in wm.screen.root.query_tree().children:
+    wm.manage_window(child)
+
+wm.select_vscreen(1)
+
+while True:
     try:
         event = wm.display.next_event()
-        if event.type in wm.EVENT_HANDLER:
-            handler = getattr(wm, wm.EVENT_HANDLER[event.type], None)
+
+        if event.type in EVENT_HANDLER:
+            handler = getattr(wm, EVENT_HANDLER[event.type], None)
             if handler:
                 handler(event)
-                if wm.update:
-                    wm.tile()
     except Exception as err:
         print("\n")
         traceback.print_tb(err.__traceback__)
-        debug(str(err), 3)
+        error(str(err))
