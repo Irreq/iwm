@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-Irreq's Window Manager (iwm)
+Irreq's (X11) Window Manager (iwm)
 
 A stacking window manager without borders and window controls.
-Created with simplicity in mind. Heavily inspired by other window managers such as pywm.
+Created with simplicity in mind. Heavily modified version of pywm.
 
 Setup: chmod +x wm.py
 Testing: Xephyr -resizeable :1 & DISPLAY=:1 /PATH/TO/iwm/iwm
@@ -48,6 +48,10 @@ keybinds = {
 
     (MOD, "Return"): ["cmd", TERMINAL],
     (MOD, "o"): ["cmd", MENU],
+
+    (MOD, "comma"): ["cmd", "amixer -q sset Master 10%-"],
+    (MOD, "period"): ["cmd", "amixer -q sset Master 10%+"],
+    (MOD, "minus"): ["cmd", "~/github/programs/pac.py toggle"],
 }
 
 # Assign keybind to virtual screen. Mod + Key -> screen N
@@ -90,17 +94,14 @@ class WindowManager():
 
     EVENT_HANDLER = {
         X.KeyPress: "handle_keypress",  # 2
-
         X.ButtonPress: "handle_button_press",  # 4
         X.ButtonRelease: "handle_button_release", # 5
         X.MotionNotify: "handle_motion_notify",  # 6
         X.EnterNotify: "handle_enter_notify",  # 7
-
         X.DestroyNotify: "handle_destroy_notify",  # 17
         X.UnmapNotify: "handle_unmap_notify",  # 18
         X.MapNotify: "handle_map_notify",  # 19
         X.MapRequest: "handle_map_request",  # 20
-
         X.ConfigureRequest: "handle_configure_request",  # 23
     }
 
@@ -131,8 +132,7 @@ class WindowManager():
     # ---------------- X wrapper functions
     def get_window_status(self, window):
         """Check if the window WINDOW do exist."""
-        windows = self.screen.root.query_tree().children
-        return window in windows
+        return window in self.screen.root.query_tree().children
 
     def get_window_class(self, window):
         """Fetch the WM_CLASS window property of the window WINDOW and return
@@ -156,13 +156,7 @@ class WindowManager():
             return window.get_geometry()
         except:
             return None
-
-    def get_window_attribute(self, window):
-        try:
-            return window.get_attributes()
-        except:
-            return None
-
+    
     def get_window_name(self, window):
         return '{} [0x{:x}]'.format(self.get_window_class(window), window.id)
 
@@ -176,8 +170,7 @@ class WindowManager():
 
     # ---------------- window manager functions
     def is_managed_window(self, window):
-        """Check if the window WINDOW is under the control of the window
-        manager."""
+        """Check if `window` is under the control of the window manager."""
         return window in self.managed_windows
 
     def convert_geometry(self, x, y, width, height):
@@ -199,16 +192,17 @@ class WindowManager():
         """The window WINDOW is put under the control of the window manager.
         The window is forced to be mapped on the current virtual screen.  The
         geometry of the window is unchnaged."""
-        attrs = self.get_window_attribute(window)
-        if attrs is None:
-            return
-        # skip if the window should not be intercepted by window manager
-        if attrs.override_redirect:
-            return
-        # skip if the window is under our control
         if self.is_managed_window(window):
             return
-
+        try:
+            attrs = window.get_attributes()
+            if attrs is None:
+                return
+            if attrs.override_redirect:
+                return
+        except:
+            return
+        
         debug('manage_window: %s' % self.get_window_name(window))
         self.managed_windows.append(window)
         self.exposed_windows.append(window)
@@ -235,23 +229,14 @@ class WindowManager():
 
     def raise_window(self, window):
         """Make the window WINDOW above all other windows."""
-        if not self.is_managed_window(window):
-            return
-        window.configure(stack_mode=X.Above)
+        if self.is_managed_window(window):
+            window.configure(stack_mode=X.Above)
 
     def focus_window(self, window):
-        """Activate the input to the window WINDOW and the window frame is
-        displayed."""
-        if not self.is_managed_window(window):
-            return
-
-        # FIXME: simple hack to remove missing window
-        if not self.get_window_status(window):
-            return
-
-        # FIXME: called two times? might be redundant
-        debug('focus_window: %s' % self.get_window_name(window))
-        window.set_input_focus(X.RevertToParent, 0)
+        """Activate the input to the WINDOW and the window frame is displayed."""
+        if self.is_managed_window(window) and self.get_window_status(window):
+            debug('focus_window: %s' % self.get_window_name(window))
+            window.set_input_focus(X.RevertToParent, 0)
 
     def select_vscreen(self, n):
         """Change the virtual screen to N."""
@@ -376,9 +361,8 @@ class WindowManager():
     def handle_map_notify(self, event):
         """Event handler for MapNotify events."""
         window = event.window
-        if self.is_managed_window(window):
-            return
-        self.manage_window(window)
+        if not self.is_managed_window(window):
+            self.manage_window(window)
 
     def handle_enter_notify(self, event):
         """Event handler for EnterNotify events."""
@@ -410,9 +394,7 @@ class WindowManager():
     # ---------------- callback functions
     def destroy_window(self, event):
         """Destroy WINDOW under cursor."""
-
         window = event.child
-
         if self.is_managed_window(window):
             debug('Destroyed: %s' % self.get_window_name(window))
             window.destroy()
@@ -425,11 +407,10 @@ class WindowManager():
 
     def move_to_screen(self, event, n):
         """Move WINDOW to screen `n`."""
-        if self.current_vscreen == n:  # Prohibit moving to current screen
-            return
+        if n != self.current_vscreen:
+            self.window_vscreen[event.child] = n
+            self.select_vscreen(self.current_vscreen)
 
-        self.window_vscreen[event.child] = n
-        self.select_vscreen(self.current_vscreen)
 
     def warp(self, event, direction):
         window = event.window
