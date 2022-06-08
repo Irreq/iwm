@@ -47,7 +47,7 @@ keybinds = {
     (MOD | SHIFT, "r"): "restart",
 
     (MOD, "Return"): ["cmd", TERMINAL],
-    (MOD, "o"): ["cmd", MENU],
+    (MOD, "o"): ["cmd", MENU], 
 
     (MOD, "comma"): ["cmd", "amixer -q sset Master 10%-"],
     (MOD, "period"): ["cmd", "amixer -q sset Master 10%+"],
@@ -173,7 +173,7 @@ class WindowManager():
         """Check if `window` is under the control of the window manager."""
         return window in self.managed_windows
 
-    def convert_geometry(self, x, y, width, height):
+    def convert_geometry(self, x, y, width, height, dumb=True):
         """Convert a geometry X, Y, WIDTH and HEIGHT from the unit coordinate
         to the pixel coordinate.  For instance, the point (0.5, 1.0) in the
         unit coordinate is mapped to the mid-bottom (i.e., south) of the
@@ -184,6 +184,10 @@ class WindowManager():
         py = int(screen_height * y)
         pwidth = int(screen_width * width)
         pheight = int(screen_height * height)
+
+        if dumb:
+            pwidth = pheight
+
         debug('convert_geometry: x=%s y=%s w=%s h=%s -> x:%s y:%s w:%s h:%s' %
               (x, y, width, height, px, py, pwidth, pheight))
         return {'x': px, 'y': py, 'width': pwidth, 'height': pheight}
