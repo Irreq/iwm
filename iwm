@@ -465,7 +465,7 @@ class WindowManager():
 
     def cmd(self, event, *args):
         """Perform a command"""
-        command = "".join(args)
+        command = "".join(args) 
         subprocess.Popen(command.split())
 
     def restart(self, event):
