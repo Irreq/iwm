@@ -52,7 +52,9 @@ keybinds = {
     (MOD, "o"): ["cmd", MENU],
 
     (MOD | CONTROL, "k"): ["cmd", "shuf -ezn 1 ~/Pictures/Wallpapers/* | xargs -0 -n1 feh --no-fehbg --bg-scale"],
-    (MOD | CONTROL, "u"): ["cmd", "xrandr --output DP-2-1 --right-of eDP-1 --output DP-1-2 --right-of DP-2-1"],
+    # (MOD | CONTROL, "u"): ["cmd", "xrandr --output DP-2-1 --right-of eDP-1 --output DP-1-2 --right-of DP-2-1"],
+    (MOD | CONTROL, "u"): ["cmd", "xrandr --output DP-2-1 --pos 3840x0 --output DP-2-2 --pos 1920x0 --output DP-1-2 --pos 0x0"],
+
 
     # (MOD, "comma"): ["cmd", "amixer -q sset Master 10%-"],
     # (MOD, "period"): ["cmd", "amixer -q sset Master 10%+"],
