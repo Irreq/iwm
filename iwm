@@ -23,6 +23,7 @@ from Xlib import X, display, XK
 # User Configuration
 TERMINAL = "/usr/bin/alacritty"
 MENU = "/usr/bin/dmenu_run"
+RANDOM_WALLPAPER = "shuf -ezn 1 ~/Pictures/Wallpapers/* | xargs -0 -n1 feh --no-fehbg --bg-scale"
 VIRTUAL_SCREENS = range(1, 10)
 
 Y_OFFSET = 8
@@ -51,7 +52,7 @@ keybinds = {
     (MOD, "Return"): ["cmd", TERMINAL],
     (MOD, "o"): ["cmd", MENU],
 
-    (MOD | CONTROL, "k"): ["cmd", "shuf -ezn 1 ~/Pictures/Wallpapers/* | xargs -0 -n1 feh --no-fehbg --bg-scale"],
+    (MOD | CONTROL, "k"): ["cmd", RANDOM_WALLPAPER],
     # (MOD | CONTROL, "u"): ["cmd", "xrandr --output DP-2-1 --right-of eDP-1 --output DP-1-2 --right-of DP-2-1"],
     (MOD | CONTROL, "u"): ["cmd", "xrandr --output DP-2-1 --pos 3840x0 --output DP-2-2 --pos 1920x0 --output DP-1-2 --pos 0x0"],
 
